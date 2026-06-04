@@ -1,0 +1,29 @@
+domain: "通用"
+keywords:
+  - "热门话题"
+
+platforms:
+  wechat: true
+  toutiao: true
+  baijiahao: true
+  weibo: true
+  sohu: true
+  zhihu: true
+
+collect:
+  max_articles_per_platform: 20
+  request_delay: [2, 5]
+  user_agents: []
+  proxy: ""
+
+viral_threshold:
+  wechat_likes: 1000
+  toutiao_comments: 500
+  weibo_reposts: 1000
+  zhihu_upvotes: 1000
+  default_reads: 100000
+
+generate:
+  min_words: 800
+  max_words: 1500
+  style: "通俗易懂，有故事性"
