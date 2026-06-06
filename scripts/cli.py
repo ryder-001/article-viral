@@ -1,7 +1,8 @@
-"""命令行入口 - 提供 collect/analyze/generate/stats 子命令"""
+"""命令行入口 - 提供 collect/analyze/generate/stats/rules 子命令"""
 import asyncio
 import json
 import os
+from datetime import datetime
 import yaml
 import click
 from scripts.db import ArticleDB
@@ -10,6 +11,9 @@ from scripts.browser_fetcher import BrowserMetricsFetcher
 from scripts.login_manager import (
     interactive_login, has_valid_cookies,
     list_saved_logins, ensure_login
+)
+from scripts.rules import (
+    load_all_rules, load_rule, get_rules_summary, get_combined_rules
 )
 
 
@@ -210,17 +214,32 @@ def stats():
 @cli.command()
 @click.option("--limit", default=50, help="分析文章数量上限")
 @click.option("--output", default=None, help="输出文件路径")
-def analyze(limit, output):
-    """导出未分析的爆款文章供 Claude 分析"""
+@click.option("--with-rules/--no-rules", default=True,
+              help="是否附带规则上下文")
+def analyze(limit, output, with_rules):
+    """导出未分析的爆款文章供分析（附带规则上下文）"""
     db = get_db()
     articles = db.get_unanalyzed_articles(limit=limit)
     if not articles:
         click.echo("没有待分析的文章")
         db.close()
         return
-    output_data = []
+    output_data = {
+        "articles": [],
+        "meta": {
+            "total": len(articles),
+            "export_time": datetime.now().isoformat(),
+        }
+    }
+    # 附带规则上下文
+    if with_rules:
+        rules = load_all_rules()
+        output_data["rules"] = rules
+        output_data["meta"]["rules_files"] = list(rules.keys())
+        click.echo(f"已加载 {len(rules)} 个规则文件: "
+                   f"{', '.join(rules.keys())}")
     for art in articles:
-        output_data.append({
+        output_data["articles"].append({
             "id": art["id"],
             "title": art["title"],
             "content": art["content"][:2000] if art.get("content") else "",
@@ -234,7 +253,7 @@ def analyze(limit, output):
     if output:
         with open(output, "w", encoding="utf-8") as f:
             json.dump(output_data, f, ensure_ascii=False, indent=2)
-        click.echo(f"已导出 {len(output_data)} 篇文章到 {output}")
+        click.echo(f"已导出 {len(output_data['articles'])} 篇文章到 {output}")
     else:
         click.echo(json.dumps(output_data, ensure_ascii=False, indent=2))
     db.close()
@@ -302,6 +321,97 @@ def login(platform):
         click.echo("\n用法: python3 -m scripts.cli login <平台名>")
         return
     asyncio.run(interactive_login(platform))
+
+
+@cli.command()
+@click.option("--name", default=None, help="查看指定规则文件")
+def rules(name):
+    """查看当前积累的爆文规则"""
+    if name:
+        content = load_rule(name)
+        if content:
+            click.echo(content)
+        else:
+            click.echo(f"规则文件不存在: {name}.md")
+    else:
+        click.echo("=== 爆文规则库 ===\n")
+        click.echo(get_rules_summary())
+        click.echo("\n使用 --name <规则名> 查看具体内容")
+
+
+@cli.command()
+@click.argument("topic")
+@click.option("--domain", default=None, help="文章领域")
+@click.option("--ref-count", default=5, help="参考文章数量")
+@click.option("--output", default=None, help="输出文件路径")
+def generate(topic, domain, ref_count, output):
+    """基于规则生成爆款文章的上下文包（供AI使用）"""
+    config = load_config()
+    db = get_db()
+    domain = domain or config.get("domain", "通用")
+
+    # 收集参考文章
+    ref_articles = db.get_viral_articles(domain=domain, limit=ref_count)
+    if not ref_articles:
+        ref_articles = db.get_viral_articles(limit=ref_count)
+
+    # 加载所有规则
+    all_rules = load_all_rules()
+
+    # 组装生成上下文包
+    context = {
+        "task": "generate_viral_article",
+        "topic": topic,
+        "domain": domain,
+        "rules": all_rules,
+        "reference_articles": [
+            {
+                "title": art["title"],
+                "content": art["content"][:1500] if art.get("content")
+                else "",
+                "platform": art["platform"],
+                "read_count": art.get("read_count", 0),
+                "like_count": art.get("like_count", 0),
+                "comment_count": art.get("comment_count", 0),
+            }
+            for art in ref_articles
+        ],
+        "generation_requirements": {
+            "word_count": "800-1500字",
+            "structure": "标题 + 正文 + 结尾互动",
+            "style": "口语化，像朋友聊天",
+            "rules_priority": [
+                "global_rules（通用写作规则）",
+                "content_strategy_rules（爆款策略）",
+                "visual_rules（配图建议）",
+            ],
+        },
+        "meta": {
+            "rules_count": len(all_rules),
+            "ref_articles_count": len(ref_articles),
+            "generate_time": datetime.now().isoformat(),
+        }
+    }
+
+    # 输出
+    if not output:
+        output = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "data", "generated",
+            f"{datetime.now().strftime('%Y-%m-%d')}-{topic}.json"
+        )
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+    with open(output, "w", encoding="utf-8") as f:
+        json.dump(context, f, ensure_ascii=False, indent=2)
+
+    click.echo(f"=== 生成上下文包 ===")
+    click.echo(f"主题: {topic}")
+    click.echo(f"领域: {domain}")
+    click.echo(f"规则文件: {', '.join(all_rules.keys())}")
+    click.echo(f"参考文章: {len(ref_articles)} 篇")
+    click.echo(f"输出到: {output}")
+    click.echo(f"\n可将此文件喂给 AI 进行文章生成。")
+    db.close()
 
 
 if __name__ == "__main__":
