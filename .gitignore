@@ -4,6 +4,10 @@ __pycache__/
 data/articles.db
 data/.browser_ready
 data/cookies/
+data/generated/
+data/temp_articles.json
 *.egg-info/
 .venv/
 .env
+.env.swp
+.claude/
