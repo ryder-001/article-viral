@@ -121,6 +121,7 @@ def markdown_to_html(md_content: str, theme_name: str = "orange") -> str:
     list_items = []
     list_type = "ul"
     list_counter = 0
+    title_skipped = False
 
     def flush_quote():
         nonlocal in_quote, quote_lines
@@ -155,6 +156,11 @@ def markdown_to_html(md_content: str, theme_name: str = "orange") -> str:
         list_counter = 0
 
     for line in lines:
+        # 跳过第一个 H1 标题（会单独填写到编辑器标题栏）
+        if not title_skipped and line.strip().startswith('# ') and not line.strip().startswith('## '):
+            title_skipped = True
+            continue
+
         # 代码块
         if line.strip().startswith('```'):
             if in_code_block:
