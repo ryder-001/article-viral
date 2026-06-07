@@ -13,7 +13,7 @@
 一行命令：
 
 ```bash
-git clone https://github.com/yourname/article-viral.git ~/.claude/skills/article-viral
+git clone https://github.com/ryder-001/article-viral.git ~/.claude/skills/article-viral
 ```
 
 装好了。剩下的事 Claude 全部自动搞定（装依赖、装浏览器、登录）。
