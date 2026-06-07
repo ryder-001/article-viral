@@ -1,4 +1,4 @@
-# 公众号文章一键发布
+# 公众号爆款文章工具 (article-viral)
 
 对 Claude 说"帮我写一篇关于XX的公众号文章"，自动完成全流程：
 
@@ -13,7 +13,7 @@
 一行命令：
 
 ```bash
-git clone https://github.com/yourname/wechat-publish.git ~/.claude/skills/wechat-publish
+git clone https://github.com/yourname/article-viral.git ~/.claude/skills/article-viral
 ```
 
 装好了。剩下的事 Claude 全部自动搞定（装依赖、装浏览器、登录）。
