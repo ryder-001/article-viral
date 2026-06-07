@@ -5,128 +5,103 @@ description: "一键生成公众号爆款文章并自动发布到微信公众号
 
 # 公众号文章一键发布
 
-说出主题 → AI写爆款文章 → 自动生成配图 → 自动粘贴到公众号编辑器 → 保存草稿。
-
-**零配置，首次使用扫码登录一次即可。个人未认证订阅号可用。**
+用户只需说出主题，你（Claude）自动完成所有步骤。用户不需要执行任何命令。
 
 ---
 
-## Step 1: 环境初始化
+## Step 1: 初始化环境
 
-每次执行前自动运行，已安装则秒过（7天缓存）：
+自动执行，对用户透明：
 
 ```bash
-SKILL_DIR="$(find "${SKILL_SEARCH_PATHS:-$HOME}" -type f -name "SKILL.md" -path "*/wechat-publish/*" -exec dirname {} \; 2>/dev/null | head -1)"
-cd "$SKILL_DIR" && python3 scripts/setup.py
+cd ~/.claude/skills/wechat-publish && python3 scripts/setup.py
 ```
 
-> setup.py 自动完成：pip 依赖安装 + Playwright Chromium 安装 + 数据目录创建 + 默认配置生成。
+若失败则执行备用：
+```bash
+cd ~/.claude/skills/wechat-publish && python3 -m pip install -q httpx beautifulsoup4 lxml pyyaml click playwright pillow && python3 -m playwright install chromium
+```
 
 ---
 
-## Step 2: 检查微信登录态
+## Step 2: 确保微信已登录
 
 ```bash
-cd "$SKILL_DIR" && python3 -m scripts.cli login
+cd ~/.claude/skills/wechat-publish && python3 -m scripts.cli login
 ```
 
-- 如果 wechat 显示 `✓ 已登录` → 继续 Step 3
-- 如果 wechat 显示 `✗ 未登录` → 执行登录：
+- wechat 显示 `✓ 已登录` → 继续
+- wechat 显示 `✗ 未登录` → 告诉用户"需要扫码登录微信公众号，马上弹出浏览器"，然后执行：
 
 ```bash
-cd "$SKILL_DIR" && python3 -m scripts.cli login wechat
+cd ~/.claude/skills/wechat-publish && python3 -m scripts.cli login wechat
 ```
-
-会弹出浏览器，用户扫码登录后 cookie 自动保存，后续不再需要。
 
 ---
 
-## Step 3: 生成爆款文章 + 配图
-
-根据用户给的**主题**，按以下流程生成内容：
+## Step 3: 写文章 + 生成配图
 
 ### 3.1 读取规则
 
-读取 `$SKILL_DIR/data/rules/global_rules.md`，获取标题/结构/内容/互动规则。
+读取 `~/.claude/skills/wechat-publish/data/rules/global_rules.md`
 
-### 3.2 写文章（Markdown格式）
+### 3.2 写文章（Markdown）
 
-严格遵循规则，生成完整公众号文章：
+根据用户主题 + 规则，生成完整文章：
 
 | 要素 | 要求 |
 |------|------|
 | 标题 | H1，18-30字，数字+情绪触发+具体承诺 |
-| 开篇 | 3句内抓住注意力（反常识/痛点/故事） |
-| 正文 | 800-1500字，3-4个小标题，每段配案例 |
+| 开篇 | 3句内抓注意力（反常识/痛点/故事） |
+| 正文 | 800-1500字，3-4个H2小标题，每段配案例 |
 | 结尾 | 金句+开放式问题+转发引导 |
 | 风格 | 口语化，像朋友聊天，多用"你""我" |
-| 配图 | 文中用 `![描述](images/...)` 标记位置 |
+| 配图 | 用 `![描述](images/子目录/文件名.jpg)` 标记 |
 
 ### 3.3 生成配图
 
-用 Python 调用 `scripts/image_gen.py` 生成 3-4 张配图：
-
-```python
+```bash
+cd ~/.claude/skills/wechat-publish && python3 -c "
 from scripts.image_gen import ImageGenerator
-gen = ImageGenerator(domain='育儿教育')  # 按主题选domain
-subdir = 'YYYY-MM-DD-主题关键词'
-
-# 从以下类型中选择 3-4 张：
-gen.generate_compare_card(...)   # 对比图（正反对比、前后对比）
-gen.generate_info_card(...)      # 信息卡（方法步骤、要点归纳）
-gen.generate_quote_card(...)     # 金句卡（核心观点）
-gen.generate_cta_card(...)       # 互动尾图（引导评论转发）
+gen = ImageGenerator(domain='育儿教育')
+subdir = 'YYYY-MM-DD-主题'
+gen.generate_compare_card(left_title='...', left_items=[...], right_title='...', right_items=[...], top_title='...', filename='compare.jpg', subdir=subdir)
+gen.generate_info_card(title='...', subtitle='...', items=[{'label':'...','desc':'...'}], filename='info.jpg', subdir=subdir)
+gen.generate_quote_card(quote='...', author='...', filename='quote.jpg', subdir=subdir)
+gen.generate_cta_card(line1='...', line2='...', cta_text='👇 评论区聊聊', filename='cta.jpg', subdir=subdir)
+"
 ```
 
-### 3.4 保存文件
+domain 选择：育儿/教育→育儿教育，职场/技术→职场干货，情感/婚姻→情感故事，健康/运动→健康养生
 
-文章保存到：`$SKILL_DIR/data/generated/YYYY-MM-DD-主题.md`
-图片保存到：`$SKILL_DIR/data/generated/images/YYYY-MM-DD-主题/`
+### 3.4 保存
+
+用 Write 工具将文章写入 `~/.claude/skills/wechat-publish/data/generated/YYYY-MM-DD-主题.md`
 
 ---
 
-## Step 4: 一键发布到公众号
+## Step 4: 发布
 
 ```bash
-cd "$SKILL_DIR" && python3 -m scripts.cli publish "data/generated/YYYY-MM-DD-主题.md"
+cd ~/.claude/skills/wechat-publish && python3 -m scripts.cli publish "data/generated/YYYY-MM-DD-主题.md"
 ```
 
-自动完成：
-1. Markdown → 公众号排版 HTML（内联CSS，自动选主题色）
-2. 本地配图 → base64 嵌入（编辑器会自动上传到微信CDN）
-3. Playwright 打开浏览器 → 加载 cookie → 进入编辑器
-4. 自动填写标题 + 粘贴排版正文
-5. 等待图片上传 → 自动点击「保存为草稿」
-
 ---
 
-## Step 5: 告知用户结果
+## Step 5: 告知用户
 
-发布成功后告诉用户：
-
-> 文章已保存到公众号草稿箱！
-> - 标题：{标题}
-> - 字数：{字数}
-> - 配图：{N}张
+> ✅ 文章已保存到公众号草稿箱！
 >
-> 请到公众号后台检查排版，确认无误后点击发布。
+> 📝 标题：{标题}
+> 📊 字数：约{N}字
+> 🖼️ 配图：{N}张
+>
+> 去公众号后台看看排版，没问题就可以发布了。
 
 ---
 
-## 默认值
+## 注意
 
-| 参数 | 默认值 |
-|------|--------|
-| 字数 | 800-1500 |
-| 排版主题 | auto（按标题关键词自动选色） |
-| 配图数量 | 3-4张 |
-| 发布模式 | 保存草稿（不会直接发布） |
-
-## 故障排查
-
-| 问题 | 解决 |
-|------|------|
-| cookie 过期 | `python3 -m scripts.cli login wechat` 重新扫码 |
-| 浏览器启动失败 | `python3 -m playwright install chromium` |
-| 正文为空 | 确保 Markdown 有 H1 标题且图片路径正确 |
-| 图片不显示 | 编辑器需要几秒上传 base64 图片，等待即可 |
+- 所有命令由你自动执行，用户零操作（仅扫码登录需要用户动手）
+- 发布固定为「保存草稿」，绝不自动发布
+- cookie 过期时自动引导重新登录
