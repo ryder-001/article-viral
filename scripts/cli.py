@@ -414,6 +414,145 @@ def generate(topic, domain, ref_count, output):
     db.close()
 
 
+@cli.command()
+@click.argument("markdown_file", type=click.Path(exists=True))
+@click.option("--title", default=None, help="文章标题（默认从md第一行H1提取）")
+@click.option("--author", default="", help="作者名")
+@click.option("--cover", default=None, type=click.Path(),
+              help="封面图路径（默认用文章第一张图）")
+@click.option("--theme", default="auto",
+              help="排版主题: orange/blue/green/purple/cyan/pink/red/auto")
+@click.option("--digest", default="", help="文章摘要（默认为空）")
+@click.option("--publish-now/--draft-only", default=False,
+              help="直接发布 or 仅保存草稿（默认仅草稿）")
+@click.option("--html-only", is_flag=True, default=False,
+              help="仅转换为HTML文件（不发布）")
+@click.option("--api", "use_api", is_flag=True, default=False,
+              help="使用微信API模式（需认证服务号 + .env 配置）")
+@click.option("--output", default=None, help="HTML输出路径（配合--html-only）")
+def publish(markdown_file, title, author, cover, theme, digest,
+            publish_now, html_only, use_api, output):
+    """将 Markdown 文章发布到微信公众号
+
+    默认使用 Playwright 自动化打开编辑器粘贴内容（适合个人号）。
+
+    \b
+    示例:
+      # 默认：Playwright 自动化粘贴到编辑器
+      python3 -m scripts.cli publish article.md
+      # 仅生成HTML文件
+      python3 -m scripts.cli publish article.md --html-only
+      # API模式（需认证服务号）
+      python3 -m scripts.cli publish article.md --api
+    """
+    from scripts.publish import extract_title, find_first_image
+    from scripts.md_to_wechat import markdown_to_html, select_theme_by_content
+
+    # 1. 读取 Markdown 文件
+    with open(markdown_file, "r", encoding="utf-8") as f:
+        md_content = f.read()
+    click.echo(f"[读取] {markdown_file}")
+
+    # 2. 提取标题
+    if not title:
+        title = extract_title(md_content)
+    if not title:
+        click.echo("[错误] 无法提取标题，请用 --title 指定")
+        return
+    click.echo(f"[标题] {title}")
+
+    # 3. 选择主题并转换 HTML
+    if theme == "auto":
+        theme = select_theme_by_content(title)
+    click.echo(f"[主题] {theme}")
+    html_content = markdown_to_html(md_content, theme)
+    click.echo(f"[转换] Markdown → HTML 完成")
+
+    # --- HTML-only 模式：输出文件后结束 ---
+    if html_only:
+        if not output:
+            base = os.path.splitext(markdown_file)[0]
+            output = base + ".html"
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        click.echo(f"[输出] {output}")
+        click.echo(f"\n排版HTML已生成，复制内容粘贴到公众号编辑器即可发布。")
+        return
+
+    # --- Playwright 自动化模式（默认） ---
+    if not use_api:
+        from scripts.wechat_publisher import publish_to_wechat_editor
+        click.echo("[模式] Playwright 自动化")
+        asyncio.run(publish_to_wechat_editor(markdown_file, title, html_content))
+        return
+
+    # --- API 模式（需认证服务号） ---
+    click.echo("[模式] 微信 API")
+    from scripts.publish import (
+        load_wechat_credentials, get_access_token,
+        upload_image, create_draft, publish_draft,
+        process_content_images,
+    )
+
+    # 加载凭证并获取 token
+    try:
+        app_id, app_secret = load_wechat_credentials()
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        click.echo(f"[错误] {e}")
+        click.echo("[提示] 个人未认证公众号请去掉 --api 使用默认模式")
+        return
+    try:
+        access_token = get_access_token(app_id, app_secret)
+    except RuntimeError as e:
+        click.echo(f"[错误] {e}")
+        return
+    click.echo("[认证] access_token 获取成功")
+
+    # 处理正文图片
+    try:
+        html_content = process_content_images(
+            html_content, markdown_file, access_token)
+        click.echo("[图片] 正文图片处理完成")
+    except Exception as e:
+        click.echo(f"[警告] 正文图片处理失败: {e}，继续执行...")
+
+    # 6. 处理封面图
+    cover_path = cover
+    if not cover_path:
+        cover_path = find_first_image(md_content, markdown_file)
+    if not cover_path:
+        click.echo("[错误] 未找到封面图，请用 --cover 指定")
+        return
+    try:
+        thumb_media_id = upload_image(access_token, cover_path)
+        click.echo(f"[封面] 上传成功: {os.path.basename(cover_path)}")
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        click.echo(f"[错误] 封面上传失败: {e}")
+        return
+
+    # 7. 创建草稿
+    try:
+        media_id = create_draft(
+            access_token, title, html_content,
+            thumb_media_id, author=author, digest=digest
+        )
+        click.echo(f"[草稿] 创建成功！media_id: {media_id}")
+    except RuntimeError as e:
+        click.echo(f"[错误] 创建草稿失败: {e}")
+        return
+
+    # 8. 可选：直接发布
+    if publish_now:
+        try:
+            publish_id = publish_draft(access_token, media_id)
+            click.echo(f"[发布] 提交成功！publish_id: {publish_id}")
+        except RuntimeError as e:
+            click.echo(f"[错误] 发布失败: {e}")
+            return
+    else:
+        click.echo("\n文章已保存到草稿箱，请前往公众号后台查看和发布。")
+
+
 if __name__ == "__main__":
     cli()
 
