@@ -15,6 +15,7 @@ from scripts.login_manager import (
 from scripts.rules import (
     load_all_rules, load_rule, get_rules_summary, get_combined_rules
 )
+from scripts.ai_detector import AIDetector
 
 
 def load_config(config_path: str = None) -> dict:
@@ -416,6 +417,67 @@ def generate(topic, domain, ref_count, output):
 
 @cli.command()
 @click.argument("markdown_file", type=click.Path(exists=True))
+@click.option("--suggest/--no-suggest", default=True,
+              help="是否给出改写建议")
+@click.option("--local-only", is_flag=True, default=False,
+              help="仅本地检测（不调用API）")
+@click.option("--threshold", default=60, help="触发API精检的分数阈值")
+def detect(markdown_file, suggest, local_only, threshold):
+    """检测文章的 AI 生成概率
+
+    \b
+    示例:
+      python3 -m scripts.cli detect article.md
+      python3 -m scripts.cli detect article.md --local-only
+      python3 -m scripts.cli detect article.md --threshold 50
+    """
+    with open(markdown_file, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    detector = AIDetector(threshold=threshold)
+    result = detector.detect(text, local_only=local_only)
+
+    # 输出结果
+    risk_icons = {"low": "✅", "medium": "⚠️", "high": "❌"}
+    icon = risk_icons.get(result.risk_level, "?")
+
+    click.echo(f"\n{'='*50}")
+    click.echo(f"  AI 检测报告 - {os.path.basename(markdown_file)}")
+    click.echo(f"{'='*50}")
+    click.echo(f"\n  {icon} 风险等级: {result.risk_level.upper()}")
+    click.echo(f"  本地算法分数: {result.local_score}/100")
+    if result.api_score is not None:
+        click.echo(f"  API 检测分数: {result.api_score}/100"
+                   f" ({result.api_provider})")
+    click.echo(f"\n  --- 各维度分数 ---")
+    labels = {
+        "sentence_variance": "句长方差",
+        "connector_density": "连接词密度",
+        "repetition": "句式重复度",
+        "opening_diversity": "段首多样性",
+        "colloquial": "口语化程度",
+    }
+    for key, label in labels.items():
+        score = result.details.get(key, 0)
+        bar = "█" * int(score / 10) + "░" * (10 - int(score / 10))
+        click.echo(f"  {label}: {bar} {score:.0f}")
+
+    if suggest and result.suggestions:
+        click.echo(f"\n  --- 改写建议 ---")
+        for i, s in enumerate(result.suggestions, 1):
+            click.echo(f"  {i}. {s}")
+
+    if result.flagged_sentences:
+        click.echo(f"\n  --- 高 AI 概率句子（前5条） ---")
+        for item in result.flagged_sentences[:5]:
+            click.echo(f"  • {item['sentence'][:40]}...")
+            click.echo(f"    原因: {', '.join(item['reasons'])}")
+
+    click.echo(f"\n{'='*50}\n")
+
+
+@cli.command()
+@click.argument("markdown_file", type=click.Path(exists=True))
 @click.option("--title", default=None, help="文章标题（默认从md第一行H1提取）")
 @click.option("--author", default="", help="作者名")
 @click.option("--cover", default=None, type=click.Path(),
@@ -430,8 +492,12 @@ def generate(topic, domain, ref_count, output):
 @click.option("--api", "use_api", is_flag=True, default=False,
               help="使用微信API模式（需认证服务号 + .env 配置）")
 @click.option("--output", default=None, help="HTML输出路径（配合--html-only）")
+@click.option("--force", is_flag=True, default=False,
+              help="跳过AI检测，强制发布")
+@click.option("--skip-detect", is_flag=True, default=False,
+              help="跳过AI检测环节")
 def publish(markdown_file, title, author, cover, theme, digest,
-            publish_now, html_only, use_api, output):
+            publish_now, html_only, use_api, output, force, skip_detect):
     """将 Markdown 文章发布到微信公众号
 
     默认使用 Playwright 自动化打开编辑器粘贴内容（适合个人号）。
@@ -452,6 +518,26 @@ def publish(markdown_file, title, author, cover, theme, digest,
     with open(markdown_file, "r", encoding="utf-8") as f:
         md_content = f.read()
     click.echo(f"[读取] {markdown_file}")
+
+    # 1.5 AI 检测环节
+    if not skip_detect and not force:
+        detector = AIDetector(threshold=60)
+        ai_result = detector.detect(md_content, local_only=True)
+        click.echo(f"[AI检测] 分数: {ai_result.local_score}/100"
+                   f" ({ai_result.risk_level.upper()})")
+        if ai_result.risk_level == "high":
+            click.echo("[AI检测] ❌ AI 痕迹过重（>70），建议修改后重试")
+            if ai_result.suggestions:
+                for s in ai_result.suggestions:
+                    click.echo(f"  → {s}")
+            click.echo("[提示] 使用 --force 可跳过检测强制发布")
+            return
+        elif ai_result.risk_level == "medium":
+            click.echo("[AI检测] ⚠️ 存在 AI 痕迹，建议优化：")
+            if ai_result.suggestions:
+                for s in ai_result.suggestions:
+                    click.echo(f"  → {s}")
+            click.echo("[继续] 风险可接受，继续发布流程...")
 
     # 2. 提取标题
     if not title:
