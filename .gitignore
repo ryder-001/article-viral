@@ -6,6 +6,7 @@ data/.browser_ready
 data/cookies/
 data/generated/
 data/hot_topics.json
+data/analysis_*.md
 data/temp_articles.json
 *.egg-info/
 .venv/
