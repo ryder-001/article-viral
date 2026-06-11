@@ -461,3 +461,140 @@ class ContentExtractor(BrowserMetricsFetcher):
         for pattern in noise_patterns:
             text = re.sub(pattern, "", text)
         return text.strip()
+
+    async def search_zhihu_articles(self, keyword: str,
+                                    limit: int = 10) -> list[dict]:
+        """通过 Playwright 浏览器搜索知乎文章/回答
+
+        知乎搜索页是 JS 渲染的，HTTP 请求拿不到内容，必须用浏览器。
+        加载已有 cookie 避免被拦截。
+        """
+        page = await self._new_page("zhihu")
+        results = []
+        try:
+            await page.goto(
+                f"https://www.zhihu.com/search?type=content&q={keyword}",
+                wait_until="domcontentloaded")
+            await page.wait_for_timeout(5000)
+
+            # 知乎搜索结果是 JS 渲染的列表
+            items = await page.evaluate(r'''() => {
+                const results = [];
+                // 搜索结果卡片
+                const cards = document.querySelectorAll(
+                    '.SearchResult-Card, [class*="ContentItem"]');
+                for (const card of cards) {
+                    const titleEl = card.querySelector(
+                        'h2 a, h2 span, [class*="ContentItem-title"] a');
+                    const authorEl = card.querySelector(
+                        '[class*="AuthorInfo"] a, [class*="author"] a');
+                    const voteEl = card.querySelector(
+                        'button[class*="VoteButton--up"]');
+                    if (!titleEl) continue;
+                    let url = '';
+                    if (titleEl.tagName === 'A') {
+                        url = titleEl.href;
+                    } else {
+                        const link = card.querySelector('a[href*="/question/"], a[href*="/p/"]');
+                        url = link ? link.href : '';
+                    }
+                    results.push({
+                        title: titleEl.innerText.trim(),
+                        url: url,
+                        author: authorEl ? authorEl.innerText.trim() : '',
+                        like_count: voteEl ? voteEl.innerText.trim() : '0',
+                    });
+                }
+                return results;
+            }''')
+
+            for item in items[:limit]:
+                url = item.get("url", "")
+                if url and not url.startswith("http"):
+                    url = "https://www.zhihu.com" + url
+                if url:
+                    results.append({
+                        "title": item["title"],
+                        "url": url,
+                        "author": item.get("author", ""),
+                        "like_count": item.get("like_count", "0"),
+                        "platform": "zhihu",
+                    })
+            return results
+        finally:
+            await page.context.close()
+
+    async def search_baidu_articles(self, keyword: str,
+                                    limit: int = 10) -> list[dict]:
+        """通过 Playwright 浏览器搜索百度资讯（含百家号文章）
+
+        百度对 HTTP 请求有严格反爬，用浏览器可以正常获取结果。
+        """
+        context = await self._browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            locale="zh-CN",
+        )
+        page = await context.new_page()
+        page.set_default_timeout(self.timeout)
+        results = []
+        try:
+            # 百度资讯搜索
+            await page.goto(
+                f"https://www.baidu.com/s?wd={keyword}&rtt=4&vit=osres",
+                wait_until="domcontentloaded")
+            await page.wait_for_timeout(4000)
+
+            # 提取搜索结果
+            items = await page.evaluate(r'''() => {
+                const results = [];
+                const cards = document.querySelectorAll(
+                    'div.result, div.result-op, [class*="result"]');
+                for (const card of cards) {
+                    const titleEl = card.querySelector('h3 a');
+                    if (!titleEl) continue;
+                    const sourceEl = card.querySelector(
+                        'span.c-color-gray, a.c-color-gray, ' +
+                        '[class*="source"], span.c-gap-right-xsmall');
+                    const abstractEl = card.querySelector(
+                        '[class*="abstract"], div.c-abstract, ' +
+                        'span.content-right_2s-H4');
+                    results.push({
+                        title: titleEl.innerText.trim(),
+                        url: titleEl.href,
+                        author: sourceEl ? sourceEl.innerText.trim() : '',
+                        content: abstractEl ? abstractEl.innerText.trim() : '',
+                    });
+                }
+                return results;
+            }''')
+
+            # 逐个跟踪百度跳转链接获取真实URL
+            for item in items[:limit]:
+                url = item.get("url", "")
+                if not url:
+                    continue
+                # 百度搜索结果的链接是 302 跳转
+                try:
+                    new_page = await context.new_page()
+                    await new_page.goto(url, wait_until="commit", timeout=10000)
+                    await new_page.wait_for_timeout(2000)
+                    real_url = new_page.url
+                    await new_page.close()
+                except Exception:
+                    real_url = url
+
+                results.append({
+                    "title": item["title"],
+                    "url": real_url,
+                    "author": item.get("author", ""),
+                    "content": item.get("content", ""),
+                    "platform": "baijiahao",
+                })
+            return results
+        finally:
+            await context.close()
+
