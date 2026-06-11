@@ -148,15 +148,15 @@ class RuleAnalyzer:
 """
 
     def _get_existing_rule_names(self) -> list[str]:
-        """获取现有规则文件名列表"""
+        """获取现有规则文件名列表（含分类路径）"""
         import glob as glob_mod
         rules_dir = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "data", "rules"
         )
         if not os.path.isdir(rules_dir):
             return []
-        files = sorted(glob_mod.glob(os.path.join(rules_dir, "*.md")))
-        return [os.path.splitext(os.path.basename(f))[0] for f in files]
+        files = sorted(glob_mod.glob(os.path.join(rules_dir, "**", "*.md"), recursive=True))
+        return [os.path.splitext(os.path.relpath(f, rules_dir))[0] for f in files]
 
     def export_for_analysis(self, limit: int = 20,
                             platform: str = None,
