@@ -66,7 +66,7 @@ cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli collect "
 
 ### 5.1 读取规则
 
-读取 `~/Documents/dev/code/51talk/article_tools/data/rules/global_rules.md`
+读取 `~/Documents/dev/code/51talk/article_tools/data/rules/` 下所有规则文件（按分类目录自动加载）
 
 ### 5.2 生成 Markdown 文章
 
@@ -208,17 +208,29 @@ cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli update-ru
 
 **3. 分析规律并更新规则**
 
-Claude 读取导出的分析素材，从标题模式、开篇钩子、结构模式、语言风格、互动设计、平台差异 6 个维度提取规律，然后更新 `data/rules/global_rules.md`。
+Claude 读取导出的分析素材，开放式提取所有维度的规律（不限于预设维度），然后在 `data/rules/` 对应分类目录下创建或更新规则文件。
+
+规则目录结构：
+```
+data/rules/
+├── writing/       # 写作技巧类
+├── style/         # 风格语言类
+├── visual/        # 视觉配图类
+├── engagement/    # 互动传播类
+├── domain/        # 领域专属规则
+├── platform/      # 平台适配规则
+└── strategy/      # 运营策略类
+```
 
 ### 写文章前的准备
 
 每次写文章前，Claude 应该：
-1. 读取 `data/rules/global_rules.md`（最新规则）
+1. 读取 `data/rules/` 下所有分类规则文件（最新规则）
 2. 从数据库取相关主题的爆款全文作为参考素材（`generate` 命令）
 3. 结合规则 + 素材 + Anti-AI 要求来写作
 
 ### 规则迭代节奏
 
 - 每采集 10-20 篇新的爆款全文后，执行一次 `update-rules` 分析
-- 分析结果由 Claude 审核后合入 `global_rules.md`
+- 分析结果由 Claude 审核后合入对应分类的规则文件
 - 规则文件头部版本号递增，记录来源文章数量
