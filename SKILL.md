@@ -173,3 +173,52 @@ cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli publish "
 - cookie 过期时自动引导重新登录
 - 领域为通用（时事、商业、社会、生活方式都可写）
 - 配图优先 AI 生图（baoyu-image-gen），失败才用 Pillow
+
+---
+
+## 规则迭代闭环（核心机制）
+
+写文章的质量取决于规则的质量。规则不是一次性写死的，而是通过不断分析爆款全文来迭代完善。
+
+### 闭环流程
+
+```
+采集全文 → 分析爆款规律 → 沉淀到规则文档 → 用规则+素材写文章 → 继续采集新爆款 → 迭代规则
+```
+
+### 操作步骤
+
+**1. 深度采集爆款全文**
+
+```bash
+# 直接给URL采集全文
+cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli deepcollect "URL1" "URL2" --platform toutiao
+
+# 补采数据库中已有但缺全文的文章
+cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli deepcollect --keyword "热点关键词" --limit 20
+```
+
+**2. 导出分析素材**
+
+```bash
+cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli update-rules --limit 20
+```
+
+这会导出一份 Markdown 文件，包含爆款全文 + 分析提示词。
+
+**3. 分析规律并更新规则**
+
+Claude 读取导出的分析素材，从标题模式、开篇钩子、结构模式、语言风格、互动设计、平台差异 6 个维度提取规律，然后更新 `data/rules/global_rules.md`。
+
+### 写文章前的准备
+
+每次写文章前，Claude 应该：
+1. 读取 `data/rules/global_rules.md`（最新规则）
+2. 从数据库取相关主题的爆款全文作为参考素材（`generate` 命令）
+3. 结合规则 + 素材 + Anti-AI 要求来写作
+
+### 规则迭代节奏
+
+- 每采集 10-20 篇新的爆款全文后，执行一次 `update-rules` 分析
+- 分析结果由 Claude 审核后合入 `global_rules.md`
+- 规则文件头部版本号递增，记录来源文章数量

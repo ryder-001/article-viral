@@ -17,6 +17,8 @@ from scripts.rules import (
 )
 from scripts.ai_detector import AIDetector
 from scripts.hot_topics import fetch_hot_topics
+from scripts.content_extractor import ContentExtractor
+from scripts.rule_analyzer import RuleAnalyzer
 
 
 def load_config(config_path: str = None) -> dict:
@@ -456,6 +458,174 @@ def hot(platform, limit, output):
         with open(output, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
         click.echo(f"已保存到: {output}")
+
+
+@cli.command()
+@click.argument("urls", nargs=-1)
+@click.option("--platform", default=None,
+              help="指定平台（用于选择提取策略）")
+@click.option("--keyword", default=None,
+              help="从数据库找已有URL进行全文补采")
+@click.option("--limit", default=10, help="补采数量上限")
+def deepcollect(urls, platform, keyword, limit):
+    """深度采集文章全文内容
+
+    \b
+    两种用法：
+      1. 直接给URL列表：deepcollect URL1 URL2 --platform toutiao
+      2. 补采已有数据：deepcollect --keyword "高考" --limit 10
+    """
+    db = get_db()
+
+    async def run():
+        extractor = ContentExtractor(headless=True)
+        await extractor.start()
+        collected = 0
+        skipped = 0
+        failed = 0
+
+        try:
+            if urls:
+                # 模式1: 直接采集给定URL
+                for url in urls:
+                    plat = platform or _guess_platform(url)
+                    click.echo(f"[采集] {plat}: {url[:60]}...")
+                    result = await extractor.extract_content(url, plat)
+                    if result.get("error"):
+                        click.echo(f"  [失败] {result['error']}")
+                        failed += 1
+                        continue
+                    if not result.get("content") or len(result["content"]) < 100:
+                        click.echo(f"  [跳过] 内容过短({len(result.get('content', ''))}字)")
+                        skipped += 1
+                        continue
+                    result["is_viral"] = True
+                    result["domain"] = "通用"
+                    db.insert_article(result)
+                    click.echo(
+                        f"  [成功] {result['title'][:30]}... "
+                        f"({len(result['content'])}字)")
+                    collected += 1
+            else:
+                # 模式2: 从数据库找内容缺失的文章进行补采
+                if keyword:
+                    rows = db.conn.execute(
+                        "SELECT id, url, platform FROM articles "
+                        "WHERE (content IS NULL OR length(content) < 200) "
+                        "AND title LIKE ? LIMIT ?",
+                        (f"%{keyword}%", limit)
+                    ).fetchall()
+                else:
+                    rows = db.conn.execute(
+                        "SELECT id, url, platform FROM articles "
+                        "WHERE (content IS NULL OR length(content) < 200) "
+                        "AND is_viral = 1 LIMIT ?",
+                        (limit,)
+                    ).fetchall()
+
+                if not rows:
+                    click.echo("[提示] 没有需要补采全文的文章")
+                    return
+
+                click.echo(f"[补采] 找到 {len(rows)} 篇需要全文采集")
+                for row in rows:
+                    art_id, url, plat = row[0], row[1], row[2]
+                    if not url:
+                        skipped += 1
+                        continue
+                    click.echo(f"  [{plat}] {url[:50]}...")
+                    result = await extractor.extract_content(url, plat)
+                    if result.get("error"):
+                        click.echo(f"    [失败] {result['error']}")
+                        failed += 1
+                        continue
+                    content = result.get("content", "")
+                    if len(content) < 100:
+                        click.echo(f"    [跳过] 内容过短({len(content)}字)")
+                        skipped += 1
+                        continue
+                    # 更新已有记录的内容
+                    db.conn.execute(
+                        "UPDATE articles SET content = ?, author = COALESCE(NULLIF(?, ''), author) "
+                        "WHERE id = ?",
+                        (content, result.get("author", ""), art_id)
+                    )
+                    db.conn.commit()
+                    click.echo(f"    [成功] 补充全文 {len(content)} 字")
+                    collected += 1
+        finally:
+            await extractor.close()
+
+        click.echo(f"\n完成！成功 {collected} 篇，跳过 {skipped} 篇，失败 {failed} 篇")
+
+    asyncio.run(run())
+    db.close()
+
+
+@cli.command("update-rules")
+@click.option("--limit", default=20, help="用于分析的文章数量")
+@click.option("--platform", default=None, help="只分析指定平台的文章")
+@click.option("--output", default=None, help="分析素材输出路径")
+def update_rules(limit, platform, output):
+    """分析爆款文章，导出规则分析素材
+
+    \b
+    工作流程：
+      1. 从数据库提取有全文的爆款文章
+      2. 组装分析上下文 + 分析提示词
+      3. 导出为 Markdown 文件
+      4. Claude 读取后分析规律并更新 data/rules/global_rules.md
+
+    \b
+    示例:
+      python3 -m scripts.cli update-rules
+      python3 -m scripts.cli update-rules --platform toutiao --limit 30
+    """
+    analyzer = RuleAnalyzer()
+    stats = analyzer.get_stats()
+
+    click.echo(f"=== 规则分析数据统计 ===")
+    click.echo(f"  爆款文章总数: {stats['total_viral']}")
+    click.echo(f"  有全文内容: {stats['with_full_content']}")
+    if stats['by_platform']:
+        click.echo(f"  各平台分布:")
+        for p, cnt in stats['by_platform'].items():
+            click.echo(f"    {p}: {cnt} 篇")
+
+    if not stats['ready_for_analysis']:
+        click.echo(f"\n[提示] 全文数据不足（需至少5篇有完整内容的文章）")
+        click.echo(f"[建议] 先用 deepcollect 采集全文：")
+        click.echo(f"  python3 -m scripts.cli deepcollect --limit 20")
+        analyzer.close()
+        return
+
+    output_path = analyzer.export_for_analysis(
+        limit=limit, platform=platform, output_path=output)
+
+    if output_path:
+        click.echo(f"\n[导出] 分析素材已保存到: {output_path}")
+        click.echo(f"[下一步] Claude 将读取此文件分析规律并更新规则文档")
+    else:
+        click.echo(f"\n[错误] 导出失败，请检查数据库中是否有全文内容")
+
+    analyzer.close()
+
+
+def _guess_platform(url: str) -> str:
+    """根据URL猜测平台"""
+    if "mp.weixin" in url or "weixin" in url:
+        return "wechat"
+    elif "toutiao.com" in url:
+        return "toutiao"
+    elif "baijiahao" in url or "baidu.com" in url:
+        return "baijiahao"
+    elif "zhihu.com" in url:
+        return "zhihu"
+    elif "weibo.com" in url:
+        return "weibo"
+    elif "sohu.com" in url:
+        return "sohu"
+    return "unknown"
 
 
 @cli.command()
