@@ -29,36 +29,87 @@ class ContentExtractor(BrowserMetricsFetcher):
             return {"error": str(e), "url": url, "platform": platform}
 
     async def _extract_wechat(self, url: str) -> dict:
-        """微信公众号文章全文提取"""
+        """微信公众号文章全文提取
+
+        支持两种URL：
+        1. 搜狗跳转链接 (weixin.sogou.com) → 尝试跟随重定向，失败则报错
+        2. 直接微信链接 (mp.weixin.qq.com/s/...)
+        """
         page = await self._new_page("wechat")
         try:
-            await page.goto(url, wait_until="domcontentloaded")
-            await page.wait_for_timeout(3000)
+            if "sogou.com" in url:
+                # 搜狗链接：尝试跟随重定向
+                await page.goto(url, wait_until="domcontentloaded",
+                                timeout=20000)
+                await page.wait_for_timeout(3000)
+                current_url = page.url
+                # 如果成功跳转到微信
+                if "mp.weixin" in current_url:
+                    url = current_url
+                else:
+                    return {
+                        "error": "搜狗反爬拦截，请使用 mp.weixin.qq.com 直接链接",
+                        "url": url, "platform": "wechat"
+                    }
+            else:
+                # 直接微信链接
+                await page.goto(url, wait_until="domcontentloaded",
+                                timeout=20000)
+                await page.wait_for_timeout(3000)
 
-            title = await self._get_text(page, "#activity-name, .rich_media_title")
-            author = await self._get_text(page, "#js_name, .rich_media_meta_nickname a")
-            publish_time = await self._get_text(page, "#publish_time, em#publish_time")
+            # 等待正文加载
+            try:
+                await page.wait_for_selector(
+                    "#js_content, .rich_media_content", timeout=10000)
+            except Exception:
+                pass
 
-            # 正文区域
-            content = await self._get_text(page, "#js_content, .rich_media_content")
+            title = await self._get_text(
+                page, "#activity-name, .rich_media_title")
+            author = await self._get_text(
+                page, "#js_name, .rich_media_meta_nickname a, "
+                      "a.weui-wa-hotarea")
+            publish_time = await self._get_text(
+                page, "#publish_time, em#publish_time")
+
+            # 正文提取
+            content = await page.evaluate(r'''() => {
+                const el = document.getElementById('js_content') ||
+                           document.querySelector('.rich_media_content');
+                if (!el) return '';
+                el.querySelectorAll(
+                    'script, style, .reward_area, .rich_media_tool, ' +
+                    '#js_pc_qr_code, .qr_code_pc'
+                ).forEach(e => e.remove());
+                return el.innerText;
+            }''')
 
             # 获取指标
             read_count = 0
-            read_el = await page.query_selector("#readNum3, #readNum")
-            if read_el:
-                read_count = self._parse_count(await read_el.inner_text())
-
             like_count = 0
-            like_el = await page.query_selector("#likeNum, #like_num")
-            if like_el:
-                like_count = self._parse_count(await like_el.inner_text())
+            try:
+                read_count = await page.evaluate(
+                    "() => window.read_num || 0") or 0
+            except Exception:
+                pass
+            try:
+                read_el = await page.query_selector(
+                    "#readNum3, #readNum")
+                if read_el:
+                    read_count = self._parse_count(
+                        await read_el.inner_text()) or read_count
+                like_el = await page.query_selector("#likeNum, #like_num")
+                if like_el:
+                    like_count = self._parse_count(await like_el.inner_text())
+            except Exception:
+                pass
 
             return {
                 "title": title.strip() if title else "",
                 "author": author.strip() if author else "",
                 "content": self._clean_content(content),
                 "publish_time": publish_time.strip() if publish_time else "",
-                "url": url,
+                "url": page.url,
                 "platform": "wechat",
                 "read_count": read_count,
                 "like_count": like_count,
@@ -67,6 +118,69 @@ class ContentExtractor(BrowserMetricsFetcher):
             }
         finally:
             await page.context.close()
+
+    async def search_wechat_articles(self, keyword: str,
+                                     limit: int = 10) -> list[dict]:
+        """通过搜狗微信搜索获取真实 mp.weixin.qq.com URL
+
+        使用 Playwright 点击方式跟踪搜狗跳转（绕过反爬），
+        获取真实的微信文章链接。
+        """
+        context = await self._browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            locale="zh-CN",
+        )
+        page = await context.new_page()
+        page.set_default_timeout(self.timeout)
+        results = []
+        try:
+            search_url = (
+                f"https://weixin.sogou.com/weixin?type=2&query={keyword}"
+                f"&ie=utf8&s_from=input"
+            )
+            await page.goto(search_url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(3000)
+
+            # 获取搜索结果数量
+            link_count = await page.evaluate(
+                "() => document.querySelectorAll('div.txt-box h3 a').length"
+            )
+            actual_limit = min(limit, link_count)
+
+            # 逐个点击链接，获取真实 URL
+            for i in range(actual_limit):
+                try:
+                    # 获取标题
+                    title = await page.evaluate(
+                        f"() => document.querySelectorAll('div.txt-box h3 a')[{i}]?.innerText || ''"
+                    )
+                    # 用 Meta+click 在新标签页打开
+                    async with context.expect_page(timeout=15000) as new_page_info:
+                        await page.evaluate(
+                            f"() => document.querySelectorAll('div.txt-box h3 a')[{i}].click()"
+                        )
+                    new_page = await new_page_info.value
+                    await new_page.wait_for_load_state("domcontentloaded")
+                    await new_page.wait_for_timeout(3000)
+                    final_url = new_page.url
+                    await new_page.close()
+
+                    if "mp.weixin" in final_url:
+                        results.append({
+                            "title": title.strip(),
+                            "url": final_url,
+                            "platform": "wechat",
+                        })
+                except Exception:
+                    continue
+
+            return results
+        finally:
+            await context.close()
 
     async def _extract_toutiao(self, url: str) -> dict:
         """今日头条文章全文提取"""
