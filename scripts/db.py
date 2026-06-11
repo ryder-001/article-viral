@@ -9,6 +9,7 @@ class ArticleDB:
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self._create_tables()
+        self._migrate()
 
     def _create_tables(self):
         self.conn.executescript("""
@@ -57,6 +58,22 @@ class ArticleDB:
                 source_articles TEXT
             );
         """)
+        self.conn.commit()
+
+    def _migrate(self):
+        """兼容旧数据库：自动添加缺失的字段"""
+        cursor = self.conn.execute("PRAGMA table_info(articles)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        migrations = [
+            ("author_id", "TEXT"),
+            ("domain", "TEXT"),
+            ("publish_time", "TEXT"),
+        ]
+        for col, col_type in migrations:
+            if col not in existing_cols:
+                self.conn.execute(
+                    f"ALTER TABLE articles ADD COLUMN {col} {col_type}"
+                )
         self.conn.commit()
 
     def insert_article(self, article: dict) -> int:

@@ -1,6 +1,4 @@
 domain: "通用"
-keywords:
-  - "热门话题"
 
 platforms:
   wechat: true
@@ -17,11 +15,11 @@ collect:
   proxy: ""
 
 viral_threshold:
-  wechat_likes: 1000
-  toutiao_comments: 500
-  weibo_reposts: 1000
-  zhihu_upvotes: 1000
-  default_reads: 100000
+  wechat_likes: 100
+  toutiao_comments: 50
+  weibo_reposts: 100
+  zhihu_upvotes: 100
+  default_reads: 1000
 
 generate:
   min_words: 800

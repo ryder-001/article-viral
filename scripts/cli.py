@@ -16,6 +16,7 @@ from scripts.rules import (
     load_all_rules, load_rule, get_rules_summary, get_combined_rules
 )
 from scripts.ai_detector import AIDetector
+from scripts.hot_topics import fetch_hot_topics
 
 
 def load_config(config_path: str = None) -> dict:
@@ -413,6 +414,48 @@ def generate(topic, domain, ref_count, output):
     click.echo(f"输出到: {output}")
     click.echo(f"\n可将此文件喂给 AI 进行文章生成。")
     db.close()
+
+
+@cli.command()
+@click.option("--platform", default=None,
+              help="指定平台（逗号分隔：zhihu,weibo,toutiao,baidu）")
+@click.option("--limit", default=20, help="每个平台显示数量上限")
+@click.option("--output", default=None, help="输出JSON文件路径")
+def hot(platform, limit, output):
+    """采集各平台热榜（知乎/微博/头条/百度）"""
+    platforms = None
+    if platform:
+        platforms = [p.strip() for p in platform.split(",")]
+
+    click.echo("[热榜] 正在采集各平台热点...")
+
+    async def run():
+        return await fetch_hot_topics(platforms=platforms, headless=True)
+
+    results = asyncio.run(run())
+
+    total = 0
+    for pname, topics in results.items():
+        if pname == "_meta":
+            continue
+        if isinstance(topics, dict) and "error" in topics:
+            click.echo(f"  [{pname}] 采集失败: {topics['error']}")
+            continue
+        displayed = topics[:limit]
+        total += len(displayed)
+        click.echo(f"\n{'='*50}")
+        click.echo(f"  {pname.upper()} 热榜 TOP{len(displayed)}")
+        click.echo(f"{'='*50}")
+        for i, t in enumerate(displayed, 1):
+            heat_str = f" ({t['heat']})" if t.get("heat") else ""
+            click.echo(f"  {i:2d}. {t['title']}{heat_str}")
+
+    click.echo(f"\n共采集 {total} 条热点话题")
+
+    if output:
+        with open(output, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        click.echo(f"已保存到: {output}")
 
 
 @cli.command()
