@@ -50,7 +50,13 @@ class WechatEditorPublisher:
         print("[发布] 正在启动 Playwright...", flush=True)
         self._pw = await async_playwright().start()
         print("[发布] 正在打开浏览器...", flush=True)
-        self._browser = await self._pw.chromium.launch(headless=self.headless)
+        try:
+            self._browser = await self._pw.chromium.launch(
+                headless=self.headless, channel="chrome")
+        except Exception:
+            # 回退到 playwright 自带 chromium 内核
+            self._browser = await self._pw.chromium.launch(
+                headless=self.headless)
         print("[发布] 浏览器已打开，创建上下文...", flush=True)
         self._context = await self._browser.new_context(
             user_agent=(
@@ -73,9 +79,9 @@ class WechatEditorPublisher:
         page = self._page
         # 先访问首页确认登录态
         await page.goto(
-            "https://mp.weixin.qq.com/", wait_until="domcontentloaded"
+            "https://mp.weixin.qq.com/", wait_until="commit", timeout=60000
         )
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(3000)
 
         # 检查是否需要重新登录
         if "login" in page.url or "scanlogin" in page.url:
@@ -90,10 +96,52 @@ class WechatEditorPublisher:
             "https://mp.weixin.qq.com/cgi-bin/appmsg"
             "?t=media/appmsg_edit&action=edit&type=77&token="
             + await self._extract_token(page),
-            wait_until="domcontentloaded",
+            wait_until="commit",
+            timeout=60000,
         )
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(4000)
         print("[发布] 已打开图文编辑器")
+
+        # 关闭干扰性弹窗（未授权切换账号 / 赞赏开通等），并等编辑器渲染
+        await self._dismiss_dialogs()
+        await self._wait_editor_ready()
+
+    async def _dismiss_dialogs(self):
+        """关闭编辑器加载时的非阻断弹窗（点「我知道了」「暂不开通」「取消」）"""
+        page = self._page
+        for _ in range(3):
+            clicked = await page.evaluate(r"""
+            () => {
+              let hit = 0;
+              const kw = ['我知道了','暂不开通','取消','知道了'];
+              const btns = [...document.querySelectorAll(
+                '.weui-desktop-dialog button, .weui-desktop-dialog a,'
+                + ' .weui-desktop-btn')];
+              for (const b of btns) {
+                const t = (b.innerText||'').trim();
+                if (kw.some(k => t === k)) { b.click(); hit++; }
+              }
+              return hit;
+            }
+            """)
+            if not clicked:
+                break
+            await page.wait_for_timeout(800)
+        print("[发布] 已尝试关闭干扰弹窗")
+
+    async def _wait_editor_ready(self):
+        """轮询等待标题/正文 ProseMirror 渲染出来（最长 ~40s）"""
+        page = self._page
+        for _ in range(20):
+            cnt = await page.evaluate(
+                "() => document.querySelectorAll('.ProseMirror').length"
+            )
+            if cnt and cnt >= 2:
+                print(f"[发布] 编辑器已就绪（ProseMirror={cnt}）")
+                return
+            await page.wait_for_timeout(2000)
+        print("[发布] 警告：等待编辑器渲染超时，继续尝试")
+
 
     async def _extract_token(self, page: Page) -> str:
         """从当前页面 URL 或 cookie 中提取 token"""
@@ -127,10 +175,12 @@ class WechatEditorPublisher:
         page = self._page
 
         # === 填写标题 ===
-        # 公众号编辑器标题是 .title-editor__input 下的 ProseMirror
-        title_editor = page.locator('.title-editor__input .ProseMirror')
+        # 标题是带 placeholder「请在这里输入标题」的 ProseMirror（第一个）
+        title_editor = page.locator(
+            '.ProseMirror[data-placeholder*="标题"]'
+        ).first
         try:
-            await title_editor.wait_for(timeout=10000)
+            await title_editor.wait_for(timeout=15000)
             await title_editor.click()
             await page.wait_for_timeout(300)
             await page.keyboard.press("Meta+a")
@@ -138,12 +188,13 @@ class WechatEditorPublisher:
             print(f"[发布] 标题已填写: {title}", flush=True)
         except Exception as e:
             print(f"[发布] 标题 locator 失败: {e}", flush=True)
-            # 备用：JS 直接写入标题 ProseMirror
+            # 备用：JS 写入第一个 ProseMirror
             await page.evaluate("""
                 (title) => {
-                    const el = document.querySelector(
-                        '.title-editor__input .ProseMirror'
-                    );
+                    const els = document.querySelectorAll('.ProseMirror');
+                    const el = [...els].find(
+                        e => (e.getAttribute('data-placeholder')||'')
+                              .includes('标题')) || els[0];
                     if (el) {
                         el.focus();
                         el.innerHTML = '<p>' + title + '</p>';
@@ -158,30 +209,32 @@ class WechatEditorPublisher:
         await page.wait_for_timeout(1000)
 
         # === 粘贴正文 ===
-        # 正文编辑器是 .rich_media_content 下的 ProseMirror
-        body_editor = page.locator(
-            '.rich_media_content .ProseMirror'
+        # 正文是正文区 ProseMirror（标题之外的可编辑 ProseMirror）
+        body_sel = (
+            "() => [...document.querySelectorAll('.ProseMirror')]"
+            ".find(e => !(e.getAttribute('data-placeholder')||'')"
+            ".includes('标题'))"
         )
+        # 先点击正文区获取焦点
         try:
+            body_editor = page.locator('.ProseMirror').nth(1)
             await body_editor.wait_for(timeout=10000)
             await body_editor.click()
         except Exception:
-            # 兜底：点击第三个 contenteditable
-            editors = page.locator('[contenteditable="true"]')
-            count = await editors.count()
-            if count >= 3:
-                await editors.nth(2).click()
+            editors = page.locator('.ProseMirror')
+            if await editors.count() >= 2:
+                await editors.nth(1).click()
             else:
                 await editors.last.click()
 
         await page.wait_for_timeout(500)
 
         # 通过 ClipboardEvent 粘贴 HTML 到正文
-        paste_ok = await page.evaluate("""
+        await page.evaluate("""
             (html) => {
-                const editor = document.querySelector(
-                    '.rich_media_content .ProseMirror'
-                );
+                const editor = [...document.querySelectorAll('.ProseMirror')]
+                    .find(e => !(e.getAttribute('data-placeholder')||'')
+                                .includes('标题'));
                 if (!editor) return false;
                 editor.focus();
                 const dt = new DataTransfer();
@@ -201,9 +254,9 @@ class WechatEditorPublisher:
         # 验证粘贴结果
         content_length = await page.evaluate("""
             () => {
-                const editor = document.querySelector(
-                    '.rich_media_content .ProseMirror'
-                );
+                const editor = [...document.querySelectorAll('.ProseMirror')]
+                    .find(e => !(e.getAttribute('data-placeholder')||'')
+                                .includes('标题'));
                 return editor ? editor.innerHTML.length : 0;
             }
         """)
@@ -212,9 +265,10 @@ class WechatEditorPublisher:
                   flush=True)
             await page.evaluate("""
                 (html) => {
-                    const editor = document.querySelector(
-                        '.rich_media_content .ProseMirror'
-                    );
+                    const editor =
+                        [...document.querySelectorAll('.ProseMirror')]
+                        .find(e => !(e.getAttribute('data-placeholder')||'')
+                                    .includes('标题'));
                     if (editor) {
                         editor.focus();
                         editor.innerHTML = html;
@@ -235,25 +289,40 @@ class WechatEditorPublisher:
         print("[发布] 等待图片上传...", flush=True)
         await page.wait_for_timeout(5000)
 
-        # 点击保存按钮
-        save_btn = page.locator('#js_submit')
+        # 保存前再清一次可能弹出的干扰弹窗
+        await self._dismiss_dialogs()
+
+        # 点击「保存为草稿」按钮（该按钮无 id/class，用精确文本定位）
+        clicked = False
         try:
-            await save_btn.wait_for(timeout=5000)
+            save_btn = page.get_by_text("保存为草稿", exact=True).first
+            await save_btn.wait_for(timeout=8000)
             await save_btn.click()
+            clicked = True
             print("[发布] 已点击「保存为草稿」", flush=True)
         except Exception as e:
-            print(f"[发布] 点击保存按钮失败: {e}", flush=True)
-            # 备用：用 JS 触发点击
-            await page.evaluate("""
+            print(f"[发布] 文本定位保存按钮失败: {e}", flush=True)
+
+        # 兜底：JS 遍历所有按钮按文本点击
+        if not clicked:
+            clicked = await page.evaluate(r"""
                 () => {
-                    const btn = document.querySelector('#js_submit');
-                    if (btn) btn.click();
+                    const els = [...document.querySelectorAll(
+                        'button, a, [role=button], .weui-desktop-btn')];
+                    const b = els.find(
+                        e => (e.innerText||'').trim() === '保存为草稿');
+                    if (b) { b.click(); return true; }
+                    // 兼容旧版 id
+                    const old = document.querySelector('#js_submit');
+                    if (old) { old.click(); return true; }
+                    return false;
                 }
             """)
-            print("[发布] 已通过 JS 触发保存", flush=True)
+            print(f"[发布] JS 触发保存: {'成功' if clicked else '未找到按钮'}",
+                  flush=True)
 
         # 等待保存完成（可能有确认弹窗或保存动画）
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(4000)
 
         # 检查是否有确认弹窗需要点击
         try:

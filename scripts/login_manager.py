@@ -59,7 +59,10 @@ async def interactive_login(platform: str) -> bool:
     print(f"[登录] 如果已经完成登录，请关闭浏览器窗口")
 
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(headless=False)
+    try:
+        browser = await pw.chromium.launch(headless=False, channel="chrome")
+    except Exception:
+        browser = await pw.chromium.launch(headless=False)
     context = await browser.new_context(
         user_agent=(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "

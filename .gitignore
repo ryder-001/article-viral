@@ -13,3 +13,10 @@ data/temp_articles.json
 .env
 .env.swp
 .claude/
+
+# skill 安装产物（第三方，不纳入业务仓库）
+.agents/
+.baoyu-skills/
+skills/
+skills-lock.json
+infographic/
