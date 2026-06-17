@@ -3,6 +3,7 @@ __pycache__/
 *.pyo
 data/articles.db
 data/.browser_ready
+data/.browser_profile/
 data/cookies/
 data/generated/
 data/hot_topics.json

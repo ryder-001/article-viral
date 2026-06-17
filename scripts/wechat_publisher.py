@@ -12,6 +12,7 @@
 """
 import asyncio
 import base64
+import json
 import mimetypes
 import os
 import re
@@ -23,6 +24,7 @@ from scripts.login_manager import (
     has_valid_cookies,
     load_cookies_to_context,
     interactive_login,
+    get_cookie_path,
 )
 
 
@@ -37,7 +39,12 @@ class WechatEditorPublisher:
         self._page: Optional[Page] = None
 
     async def start(self):
-        """启动 Playwright 浏览器并加载 wechat cookie"""
+        """启动 Playwright 浏览器并加载 wechat cookie
+
+        使用持久化用户数据目录（launch_persistent_context），让微信后台的
+        静态资源（JS/CSS/图片）落到磁盘缓存，第二次起打开页面明显更快，
+        同时登录态也能在多次发布间复用。
+        """
         if not has_valid_cookies("wechat"):
             print("[发布] 未找到微信公众号 cookie，需要先登录...")
             success = await interactive_login("wechat")
@@ -49,16 +56,18 @@ class WechatEditorPublisher:
 
         print("[发布] 正在启动 Playwright...", flush=True)
         self._pw = await async_playwright().start()
-        print("[发布] 正在打开浏览器...", flush=True)
-        try:
-            self._browser = await self._pw.chromium.launch(
-                headless=self.headless, channel="chrome")
-        except Exception:
-            # 回退到 playwright 自带 chromium 内核
-            self._browser = await self._pw.chromium.launch(
-                headless=self.headless)
-        print("[发布] 浏览器已打开，创建上下文...", flush=True)
-        self._context = await self._browser.new_context(
+        print("[发布] 正在打开浏览器（持久化缓存）...", flush=True)
+
+        # 持久化用户数据目录：缓存静态资源 + 复用登录态
+        profile_dir = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "data", ".browser_profile",
+        )
+        os.makedirs(profile_dir, exist_ok=True)
+
+        ctx_kwargs = dict(
+            user_data_dir=profile_dir,
+            headless=self.headless,
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -66,12 +75,25 @@ class WechatEditorPublisher:
             ),
             locale="zh-CN",
         )
+        try:
+            self._context = await self._pw.chromium.launch_persistent_context(
+                channel="chrome", **ctx_kwargs)
+        except Exception:
+            # 回退到 playwright 自带 chromium 内核
+            self._context = await self._pw.chromium.launch_persistent_context(
+                **ctx_kwargs)
+        print("[发布] 浏览器已打开（用户数据目录已复用）", flush=True)
+
         # 授予剪贴板权限
         await self._context.grant_permissions(
             ["clipboard-read", "clipboard-write"]
         )
         await load_cookies_to_context(self._context, "wechat")
-        self._page = await self._context.new_page()
+        # persistent_context 自带一个初始页面，直接复用，避免多开
+        if self._context.pages:
+            self._page = self._context.pages[0]
+        else:
+            self._page = await self._context.new_page()
         print("[发布] 浏览器已启动，cookie 已加载")
 
     async def open_editor(self):
@@ -83,13 +105,10 @@ class WechatEditorPublisher:
         )
         await page.wait_for_timeout(3000)
 
-        # 检查是否需要重新登录
-        if "login" in page.url or "scanlogin" in page.url:
-            print("[发布] cookie 已过期，需要重新登录...")
-            raise RuntimeError(
-                "微信 cookie 已过期，请重新执行: "
-                "python3 -m scripts.cli login wechat"
-            )
+        # 检查是否需要重新登录——不再直接报错退出，而是暂停等用户扫码
+        if self._is_login_page(page.url):
+            print("[发布] 检测到需要登录微信公众号...")
+            await self._wait_for_manual_login()
 
         # 直接访问新建图文页面
         await page.goto(
@@ -100,11 +119,100 @@ class WechatEditorPublisher:
             timeout=60000,
         )
         await page.wait_for_timeout(4000)
+
+        # 跳转后可能又被打回登录页（cookie 半失效），再兜底等一次
+        if self._is_login_page(page.url):
+            print("[发布] 打开编辑器时被要求登录...")
+            await self._wait_for_manual_login()
+            await page.goto(
+                "https://mp.weixin.qq.com/cgi-bin/appmsg"
+                "?t=media/appmsg_edit&action=edit&type=77&token="
+                + await self._extract_token(page),
+                wait_until="commit",
+                timeout=60000,
+            )
+            await page.wait_for_timeout(4000)
+
         print("[发布] 已打开图文编辑器")
 
         # 关闭干扰性弹窗（未授权切换账号 / 赞赏开通等），并等编辑器渲染
         await self._dismiss_dialogs()
         await self._wait_editor_ready()
+
+    @staticmethod
+    def _is_login_page(url: str) -> bool:
+        """判断当前 URL 是否为登录/扫码页"""
+        u = (url or "").lower()
+        return ("login" in u) or ("scanlogin" in u) or ("/safe/" in u)
+
+    async def _wait_for_manual_login(self, timeout_sec: int = 300):
+        """暂停在当前浏览器窗口，等待用户手动扫码登录后继续。
+
+        不关闭浏览器，轮询检测是否已进入后台（URL 含 token/cgi-bin/home）。
+        登录成功后把最新 cookie 回写到本地，供下次复用。
+        """
+        page = self._page
+        print("\n" + "=" * 50)
+        print("[发布] 请在已打开的浏览器窗口中扫码登录微信公众号")
+        print(f"[发布] 登录成功后会自动继续（最长等待 {timeout_sec} 秒）")
+        print("[发布] 请勿关闭浏览器窗口")
+        print("=" * 50 + "\n", flush=True)
+
+        waited = 0
+        interval = 3
+        while waited < timeout_sec:
+            await asyncio.sleep(interval)
+            waited += interval
+            try:
+                current = page.url
+            except Exception:
+                # 页面在导航中，稍后重试
+                continue
+            # 进入后台首页或带 token 即视为登录成功
+            if (not self._is_login_page(current)) and (
+                "token=" in current
+                or "/cgi-bin/home" in current
+                or "/cgi-bin/" in current
+            ):
+                print(f"[发布] 检测到登录成功！({current.split('?')[0]})",
+                      flush=True)
+                await self._save_cookies()
+                # 给后台首页留一点渲染时间
+                await page.wait_for_timeout(2000)
+                return
+            # 还停在首页根路径时，主动探一次后台，触发跳转
+            if current.rstrip("/").endswith("mp.weixin.qq.com"):
+                try:
+                    await page.goto(
+                        "https://mp.weixin.qq.com/cgi-bin/home",
+                        wait_until="commit", timeout=30000,
+                    )
+                    await page.wait_for_timeout(1500)
+                    if "token=" in page.url:
+                        print("[发布] 检测到登录成功！", flush=True)
+                        await self._save_cookies()
+                        return
+                except Exception:
+                    pass
+
+        raise RuntimeError(
+            f"等待登录超时（{timeout_sec}秒）。请重新运行发布命令，"
+            "或先执行 python3 -m scripts.cli login wechat"
+        )
+
+    async def _save_cookies(self):
+        """把当前 context 的 cookie 回写到本地，供下次复用"""
+        try:
+            cookies = await self._context.cookies()
+            if cookies:
+                path = get_cookie_path("wechat")
+                with open(path, "w") as f:
+                    json.dump(cookies, f, ensure_ascii=False, indent=2)
+                print(f"[发布] 已更新 wechat cookie（{len(cookies)} 条）",
+                      flush=True)
+        except Exception as e:
+            print(f"[发布] 保存 cookie 失败（不影响本次发布）: {e}",
+                  flush=True)
 
     async def _dismiss_dialogs(self):
         """关闭编辑器加载时的非阻断弹窗（点「我知道了」「暂不开通」「取消」）"""
@@ -130,16 +238,39 @@ class WechatEditorPublisher:
         print("[发布] 已尝试关闭干扰弹窗")
 
     async def _wait_editor_ready(self):
-        """轮询等待标题/正文 ProseMirror 渲染出来（最长 ~40s）"""
+        """轮询等待标题/正文 ProseMirror 渲染出来（最长 ~40s）。
+
+        若过程中页面被重定向到登录页（执行上下文被销毁），
+        则暂停等待用户扫码登录后重新打开编辑器，而不是直接崩溃。
+        """
         page = self._page
         for _ in range(20):
-            cnt = await page.evaluate(
-                "() => document.querySelectorAll('.ProseMirror').length"
-            )
+            # 渲染轮询期间页面可能正在跳转，evaluate 会抛
+            # "Execution context was destroyed"，这里捕获后判断是否跳到登录页
+            try:
+                cnt = await page.evaluate(
+                    "() => document.querySelectorAll('.ProseMirror').length"
+                )
+            except Exception:
+                await page.wait_for_timeout(1500)
+                if self._is_login_page(page.url):
+                    print("[发布] 编辑器加载中被打回登录页，等待扫码登录...")
+                    await self._wait_for_manual_login()
+                    await self.open_editor()
+                    return
+                continue
+
             if cnt and cnt >= 2:
                 print(f"[发布] 编辑器已就绪（ProseMirror={cnt}）")
                 return
             await page.wait_for_timeout(2000)
+
+            # 没渲染出来时，也可能是悄悄跳到了登录页
+            if self._is_login_page(page.url):
+                print("[发布] 检测到登录页，等待扫码登录...")
+                await self._wait_for_manual_login()
+                await self.open_editor()
+                return
         print("[发布] 警告：等待编辑器渲染超时，继续尝试")
 
 
@@ -365,6 +496,9 @@ class WechatEditorPublisher:
     async def close(self):
         """清理资源"""
         try:
+            # persistent_context 模式下没有独立 browser，关 context 即可
+            if self._context:
+                await self._context.close()
             if self._browser:
                 await self._browser.close()
             if self._pw:
