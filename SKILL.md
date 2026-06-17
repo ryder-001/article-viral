@@ -1,5 +1,5 @@
 ---
-name: article-viral
+name: article_tools
 description: "多平台内容工具：采集热点 → 写文 → 配图 → AI检测 → 发布到公众号。输入主题即可全自动完成。触发词: '发公众号', '写公众号文章', '公众号发布', '发布文章', '写一篇文章发到公众号', '帮我发一篇', '写篇文章并发布', '/publish', '一键发布', '自动发布公众号', '生成并发布文章', '公众号一键发文', '帮我写篇公众号文章', '爆文', '爆款文章', '/article', '采集文章', '生成文章', '流量文', '热点文章', '写文章'"
 ---
 
@@ -7,7 +7,7 @@ description: "多平台内容工具：采集热点 → 写文 → 配图 → AI�
 
 用户只需说出主题（或让系统自动推荐热点），Claude 自动完成全部步骤。
 
-**项目路径**: `~/Documents/dev/code/51talk/article_tools`
+**工作目录约定**: 下文所有 `python3 ...` 命令都在本技能根目录（即本 SKILL.md 所在目录，下称 `$SKILL_DIR`）下执行。运行前先 `cd "$SKILL_DIR"`。不要硬编码任何绝对业务路径，技能装在哪就在哪运行。
 
 ---
 
@@ -16,7 +16,7 @@ description: "多平台内容工具：采集热点 → 写文 → 配图 → AI�
 自动执行，对用户透明：
 
 ```bash
-cd ~/Documents/dev/code/51talk/article_tools && python3 scripts/setup.py
+python3 scripts/setup.py
 ```
 
 ---
@@ -24,14 +24,17 @@ cd ~/Documents/dev/code/51talk/article_tools && python3 scripts/setup.py
 ## Step 2: 确保微信已登录
 
 ```bash
-cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli login
+python3 -m scripts.cli login
 ```
+
+该命令会列出所有平台（toutiao/zhihu/weibo/wechat/baijiahao）的登录状态表。
+只关注其中 wechat 一行：
 
 - wechat 显示 `✓ 已登录` → 继续
 - wechat 显示 `✗ 未登录` → 告诉用户"需要扫码登录微信公众号"，然后执行：
 
 ```bash
-cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli login wechat
+python3 -m scripts.cli login wechat
 ```
 
 ---
@@ -41,7 +44,7 @@ cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli login wec
 如果用户没有指定主题，或要求"写个热点文章"：
 
 ```bash
-cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli hot --limit 10
+python3 -m scripts.cli hot --limit 10
 ```
 
 从热榜中挑选 2-3 个适合公众号的选题推荐给用户，让用户选择或自己指定。
@@ -57,7 +60,7 @@ cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli hot --lim
 - 可执行关键词采集获取参考素材：
 
 ```bash
-cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli collect "关键词" --platform toutiao --no-authors
+python3 -m scripts.cli collect "关键词" --platform toutiao --no-authors
 ```
 
 ---
@@ -66,7 +69,7 @@ cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli collect "
 
 ### 5.1 读取规则
 
-读取 `~/Documents/dev/code/51talk/article_tools/data/rules/` 下所有规则文件（按分类目录自动加载）
+读取 `data/rules/` 下所有规则文件（按分类目录自动加载）
 
 ### 5.2 生成 Markdown 文章
 
@@ -93,30 +96,44 @@ cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli collect "
 ### 5.4 保存文章
 
 用 Write 工具将文章写入：
-`~/Documents/dev/code/51talk/article_tools/data/generated/YYYY-MM-DD-主题.md`
+`data/generated/YYYY-MM-DD-主题.md`（相对 `$SKILL_DIR`）
 
 ---
 
 ## Step 6: AI 检测
 
 ```bash
-cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli detect "data/generated/YYYY-MM-DD-主题.md"
+python3 -m scripts.cli detect "data/generated/YYYY-MM-DD-主题.md"
 ```
 
 判断标准：
-- 分数 ≤ 40 → ✅ 放行，继续下一步
-- 分数 41-70 → ⚠️ 警告，告知用户但继续
+- 分数 ≤ 10 → ✅ 放行，继续下一步
+- 分数 11-70 → ⚠️ 警告，告知用户但继续
 - 分数 > 70 → ❌ 阻断，根据建议改写文章后重新检测
 
 ---
 
 ## Step 7: 配图
 
-优先使用 `baoyu-image-gen` skill 生成 AI 配图：
-- 根据文章中 `![描述](prompt: ...)` 标记生成对应图片
-- 生成后替换文章中的图片路径
+配图后端为本技能内置的 `baoyu-image-gen`（位于 `.agents/skills/baoyu-image-gen/`，通过命令行 `bun` 调用，不是顶层注册的 Skill，不能用 Skill 工具触发）。
 
-如果 baoyu-image-gen 不可用或失败，fallback 到 Pillow 卡片生成：
+优先用 AI 生图，根据文章中 `![描述](prompt: ...)` 标记逐张生成：
+
+```bash
+# 单张生成（在 $SKILL_DIR 下执行）
+bun .agents/skills/baoyu-image-gen/scripts/main.ts \
+  --prompt "这里放图片的生图提示词" \
+  --image "data/generated/YYYY-MM-DD-imgs/01.png" \
+  --ar 1:1 --quality 2k
+```
+
+- 默认 provider 自动检测（已配置 `DASHSCOPE_API_KEY`，会走 DashScope/通义万象）
+- 生成后把文章里对应的 `![描述](prompt: ...)` 替换为实际图片相对路径
+- 多张图可逐条调用；需要批量时用 `--batchfile` 模式
+
+前置检查：若 `bun` 不在 PATH，或所有图像 API key 均未配置（`.baoyu-skills/.env` 里没有 `DASHSCOPE_API_KEY` 等），则 AI 生图不可用，直接走下面的 Pillow fallback。
+
+如果 AI 生图不可用或失败，fallback 到 Pillow 卡片生成：
 
 ```python
 from scripts.image_gen import ImageGenerator
@@ -128,25 +145,33 @@ gen = ImageGenerator(domain='通用')
 
 ## Step 8: 封面图
 
-根据文章在卡片中的位置选择封面比例：
+封面同样用内置的 `baoyu-image-gen` 命令行生成，根据文章在卡片中的位置选择比例：
 
 ### 头条位置（第1篇）
-- 比例：2.35:1 横向宽图
+- 比例：`--ar 2.35:1` 横向宽图
 - 底部 20% 留白（公众号会叠加标题）
 - 视觉重心在上半部
 
 ### 非头条位置（第2-8篇）
-- 比例：1:1 正方形
+- 比例：`--ar 1:1` 正方形
 - 文字可居中
 
-使用 `baoyu-cover-image` skill 生成封面图，指定对应 aspect ratio。
+```bash
+# 封面图示例（头条位）
+bun .agents/skills/baoyu-image-gen/scripts/main.ts \
+  --prompt "封面生图提示词，强调主视觉与留白" \
+  --image "data/generated/YYYY-MM-DD-imgs/cover.png" \
+  --ar 2.35:1 --quality 2k
+```
+
+封面生成失败时，同样可用 Step 7 的 Pillow fallback 出一张卡片当封面。
 
 ---
 
 ## Step 9: 发布
 
 ```bash
-cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli publish "data/generated/YYYY-MM-DD-主题.md"
+python3 -m scripts.cli publish "data/generated/YYYY-MM-DD-主题.md"
 ```
 
 固定为「保存草稿」模式，绝不自动发布。
@@ -172,7 +197,7 @@ cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli publish "
 - 发布固定为「保存草稿」，绝不自动群发
 - cookie 过期时自动引导重新登录
 - 领域为通用（时事、商业、社会、生活方式都可写）
-- 配图优先 AI 生图（baoyu-image-gen），失败才用 Pillow
+- 配图优先 AI 生图（命令行调用内置 `.agents/skills/baoyu-image-gen`），失败才用 Pillow
 
 ---
 
@@ -192,16 +217,16 @@ cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli publish "
 
 ```bash
 # 直接给URL采集全文
-cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli deepcollect "URL1" "URL2" --platform toutiao
+python3 -m scripts.cli deepcollect "URL1" "URL2" --platform toutiao
 
 # 补采数据库中已有但缺全文的文章
-cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli deepcollect --keyword "热点关键词" --limit 20
+python3 -m scripts.cli deepcollect --keyword "热点关键词" --limit 20
 ```
 
 **2. 导出分析素材**
 
 ```bash
-cd ~/Documents/dev/code/51talk/article_tools && python3 -m scripts.cli update-rules --limit 20
+python3 -m scripts.cli update-rules --limit 20
 ```
 
 这会导出一份 Markdown 文件，包含爆款全文 + 分析提示词。

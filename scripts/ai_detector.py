@@ -246,7 +246,7 @@ class AIDetector:
         score = round(min(100, max(0, score)), 1)
 
         # 确定风险等级
-        if score <= 40:
+        if score <= 10:
             risk_level = "low"
         elif score <= 70:
             risk_level = "medium"
@@ -353,7 +353,7 @@ class AIDetector:
             # 综合分数：本地 40% + API 60%
             combined = result.local_score * 0.4 + api_result["score"] * 0.6
             combined = round(combined, 1)
-            if combined <= 40:
+            if combined <= 10:
                 result.risk_level = "low"
             elif combined <= 70:
                 result.risk_level = "medium"

@@ -67,14 +67,8 @@ def check_and_install_browser():
             print("[setup] 浏览器已就绪（缓存）")
             return True
 
-    # 检测 chromium 是否已下载
+    # 检测 chromium 是否已下载（尝试导入并检查浏览器路径）
     try:
-        result = _run(
-            [sys.executable, "-m", "playwright", "install", "--dry-run",
-             "chromium"], check=False
-        )
-        # dry-run 不存在时会直接安装，用 which 检测更可靠
-        # 改用尝试导入并检查浏览器路径
         from playwright._impl._driver import compute_driver_executable
         driver = compute_driver_executable()
         if os.path.exists(driver):
