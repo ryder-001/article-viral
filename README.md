@@ -11,7 +11,7 @@
 ## 安装
 
 ```bash
-git clone https://github.com/ryder-001/article-viral.git ~/Documents/dev/code/51talk/article_tools
+git clone https://github.com/ryder-001/article-viral.git ~/.claude/skills/article_tools
 ```
 
 装好了。剩下的事 Claude 全部自动搞定（装依赖、装浏览器、登录）。
@@ -123,7 +123,7 @@ data/rules/
 | 3. 热点采集 | 浏览器抓取知乎/微博/头条/百度热榜 | 全自动 |
 | 4. 选题确定 | 用户指定或从热榜推荐 | 交互 |
 | 5. 写文章 | 读取全部规则 + Anti-AI 写作 | 全自动 |
-| 6. AI 检测 | ≤40放行，41-70警告，>70阻断改写 | 全自动 |
+| 6. AI 检测 | ≤10放行，11-70警告，>70阻断改写 | 全自动 |
 | 7. 配图 | 优先 AI 生图，失败用 Pillow 卡片 | 全自动 |
 | 8. 封面图 | 头条=2.35:1留白，非头条=1:1 | 全自动 |
 | 9. 发布 | Playwright 自动化保存草稿 | 全自动 |
@@ -188,7 +188,7 @@ article_tools/
 - **SQLite** — 文章/作者/生成记录存储
 - **Click** — CLI 框架
 - **httpx** — 异步 HTTP 采集
-- **baoyu-image-gen** — AI 配图生成（DashScope/OpenAI/Google 等）
+- **baoyu-image-gen** — AI 配图生成，命令行 `bun` 调用内置 `.agents/skills/baoyu-image-gen`（DashScope/OpenAI/Google 等）
 - **Pillow** — 卡片式配图 fallback
 
 ---
